@@ -9,6 +9,10 @@
 #define SCREEN_HEIGHT 128 // OLED display height, in pixels
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
+//----------------debug-----------------------
+bool TEST = 0;
+//----------------debug-----------------------
+
 #define but1 33
 #define but2 32
 #define but3 25
@@ -38,13 +42,21 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 //--------------------------------------------------
 
-bool needRender;
+
 uint16_t playerX = WorldW/2;
 uint16_t playerY = Surface-1;
 uint64_t tmr = 0;
 uint64_t gravityTmr = 0;
 uint64_t liquidTmr = 0;
+
+
+//---------------render-----------------------------
+uint8_t screenBuffer[9][8];
+bool needRender;
 uint64_t renderTmr = 0;
+//---------------render-----------------------------
+
+
 
 //---------------liquid system----------------------
 #define liquidBufferSize 100
@@ -53,7 +65,7 @@ uint16_t activeCount = 0;
 uint8_t liquidBuffer[2][liquidBufferSize];          //1-x 2-y
 //---------------liquid system----------------------
 
-#define numOfSprites 13
+
 
 void mainMenu() {
   int counter = 0;
@@ -115,8 +127,21 @@ void mainMenu() {
 }
 
 
-
-
+//------------BLOCK_TYPES-------------------------
+#define GRASS_DIRT 0
+#define DIRT 1
+#define STONE 2
+#define TUFF 3
+#define ORE1 4
+#define ORE2 5
+#define ORE3 6
+#define ORE4 7
+#define SKY 8
+#define DIRT_BG 9
+#define LADDER 10
+#define SAND 11
+//------------BLOCK_TYPES-------------------------
+#define numOfSprites 13
 const uint16_t sprites[numOfSprites][64] PROGMEM = {
   {
     //земля с травой 0
@@ -427,35 +452,39 @@ void drawBar(int persent) {
 }
 
 void render(int scale) {
-  tft.fillScreen(ST77XX_BLACK);
+  //tft.fillScreen(ST77XX_BLACK);
   uint8_t blockType = 0;
   int blockX = 0;
   int blockY = 0;
   for (int i = playerX-(((SCREEN_WIDTH-16)/(8*scale))/2); i <= playerX+1+((SCREEN_WIDTH-16)/(8*scale))/2; i++) {
     for (int n = playerY-(SCREEN_HEIGHT/(8*scale))/2; n <= playerY+(SCREEN_HEIGHT/(8*scale))/2; n++) {
-      Serial.print(i);
-      Serial.print("/");
-      Serial.print(n);
-      Serial.print("/");
-      Serial.print(world[i][n].type);
-      Serial.print("/");
-      Serial.print(blockX);
-      Serial.print("/");
-      Serial.print(blockY);
-      Serial.print("/");
-      Serial.print(world[i][n].flags, BIN);
-      Serial.print(" ");
-      if (i > WorldW-1) {
-        blockType = world[(i-(WorldW-1))-1][n].type;
-      }else if (i < 0) {
-        blockType = world[i+WorldW][n].type;
-      }else{
-        blockType = world[i][n].type;
+      if (TEST) {
+        Serial.print(i);
+        Serial.print("/");
+        Serial.print(n);
+        Serial.print("/");
+        Serial.print(world[i][n].type);
+        Serial.print("/");
+        Serial.print(blockX);
+        Serial.print("/");
+        Serial.print(blockY);
+        Serial.print("/");
+        Serial.print(world[i][n].flags, BIN);
+        Serial.print(" ");
       }
       if (n < 0) {
         blockType = 8;
+      }else{
+        if (i > WorldW-1) {
+          blockType = world[(i-(WorldW-1))-1][n].type;
+        }else if (i < 0) {
+          blockType = world[i+WorldW][n].type;
+        }else{
+          blockType = world[i][n].type;
+        }
       }
-      drawBitmp(blockX*(8*scale)+16, blockY*(8*scale), blockType, scale);
+      if (screenBuffer[blockX][blockY] != blockType) drawBitmp(blockX*(8*scale)+16, blockY*(8*scale), blockType, scale);
+      screenBuffer[blockX][blockY] = blockType;
       blockY++;
     }
     blockY = 0;
@@ -468,11 +497,13 @@ void render(int scale) {
   if (playerY-Surface < 0 ) persent2 = 0;
   float persent3 = persent1*persent2;
   drawBar((int)persent3);
-  tft.setCursor(32, 0);
-  tft.print("X");
-  tft.print(playerX);
-  tft.print("/Y");
-  tft.print(playerY);
+  if (TEST) {
+    tft.setCursor(32, 0);
+    tft.print("X");
+    tft.print(playerX);
+    tft.print("/Y");
+    tft.print(playerY);
+  }
   return;
 }
 
@@ -619,10 +650,16 @@ void liquidTick() {
 
 
 void setup() {
+  for (int i = 0; i < 9; i++) {
+    for (int n = 0; n < 8; n++) {
+      screenBuffer[i][n] = -1;            //Заполнение буффера невозможными ID спрайтов чтобы не вызвать ошибок
+    }
+  }
   Serial.begin(115200);
-  Serial.print("Testing random... ");
-  Serial.print(Random(32, 64));
-  
+  if (TEST) {
+    Serial.print("Testing random... ");
+    Serial.print(Random(32, 64));
+  }
   playerX = Random(0, WorldW-1);
   tft.initR(INITR_BLACKTAB);      // Init ST7735S chip, black tab
   tft.setSPISpeed(70000000);
@@ -636,13 +673,15 @@ void setup() {
   tft.setCursor(32,0);
   //mainMenu();
   generateWorld();
-  world[60][Surface-1] = {2, 0b00001100};
-  world[59][Surface-1] = {3, 0b00001100};
-  world[58][Surface-1] = {4, 0b00001100};
-  world[57][Surface-1] = {5, 0b00001100};
-  world[56][Surface-1] = {6, 0b00001100};
-  world[55][Surface-1] = {7, 0b00001100};
-  world[playerX][29] = {11, MOVABLE};
+  if (TEST) {
+    world[60][Surface-1] = {2, 0b00001100};
+    world[59][Surface-1] = {3, 0b00001100};
+    world[58][Surface-1] = {4, 0b00001100};
+    world[57][Surface-1] = {5, 0b00001100};
+    world[56][Surface-1] = {6, 0b00001100};
+    world[55][Surface-1] = {7, 0b00001100};
+    world[playerX][29] = {11, MOVABLE};
+  }
   render(2);
 }
 
@@ -722,8 +761,7 @@ void loop() {
         checkLiquidBlocks(playerX, playerY);
         needRender = 1;
       }
-    }
-    if (analogRead(joyy) >= 2500) {
+    }else if (analogRead(joyy) >= 2500) {
       if (playerY > 0) {
         if ((world[playerX][playerY-1].flags & (1<<0)) || (world[playerX][playerY-1].flags & (1<<4))) {
           world[playerX][playerY].flags = 0b00101;
