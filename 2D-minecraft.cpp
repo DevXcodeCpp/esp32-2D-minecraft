@@ -21,18 +21,101 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 #define numOre 4
 
 //шансы генерации блоков под землей (умножены на 10)
-#define chanceStone 150   //15%
+#define chanceStone 200   //15%
 #define chanceOre1 50   //5%
 #define chanceOre2 20   //2%
 #define chanceOre3 10   //1%
 #define chanceOre4 5   //0.5%
 
+//--------Значения регистра блока-------------------
+
+#define BROKEN   (1<<0) // сломан (пустота)
+#define MOVABLE  (1<<1) // может двигаться (жидкость/песок)
+#define RENDERED (1<<2) // прорисован
+#define UNBREAKABLE (1<<3) // нельзя сломать
+#define NO_COLLISION (1<<4) // можно пройти сквозь (задний фон, лестница)
+#define ADD_BUFFER (1<<5)  //блок уже добавлен в буффер жидкости
+
+//--------------------------------------------------
+
+bool needRender;
 uint16_t playerX = WorldW/2;
 uint16_t playerY = Surface-1;
 uint64_t tmr = 0;
-uint64_t tmr1 = 0;
+uint64_t gravityTmr = 0;
+uint64_t liquidTmr = 0;
+uint64_t renderTmr = 0;
 
-#define numOfSprites 12
+//---------------liquid system----------------------
+#define liquidBufferSize 100
+#define liquidUpdate 100
+uint16_t activeCount = 0;
+uint8_t liquidBuffer[2][liquidBufferSize];          //1-x 2-y
+//---------------liquid system----------------------
+
+#define numOfSprites 13
+
+void mainMenu() {
+  int counter = 0;
+  uint64_t tmr3 = 0;
+
+  bool worldType;
+  tft.setTextSize(1);   
+  tft.setTextColor(ST7735_WHITE);
+  tft.setCursor(0,counter*16);
+  tft.print(">");
+  tft.setCursor(16,0);
+  tft.print("Start");
+  tft.setCursor(16,16);
+  tft.print("Generate type:");
+  tft.print(" flat");
+  while(true) {
+    if (millis()-tmr3 >= 300) {
+      tmr3 = millis();
+      if (analogRead(joyy) >= 2500) {     //вверх
+        if (counter > 0) {
+          tft.setTextColor(ST7735_BLACK);
+          tft.setCursor(0,counter*16);
+          tft.print(">");
+          counter--;
+          tft.setTextColor(ST7735_WHITE);
+          tft.setCursor(0,counter*16);
+          tft.print(">");
+        }
+      }else if(analogRead(joyy) <= 800) {     //вниз
+        if (counter < 2) {
+          tft.setTextColor(ST7735_BLACK);
+          tft.setCursor(0,counter*16);
+          tft.print(">");
+          counter++;
+          tft.setTextColor(ST7735_WHITE);
+          tft.setCursor(0,counter*16);
+          tft.print(">");
+        }
+      }
+      if (counter == 1) {
+        if (digitalRead(but1) == 1) {
+          worldType = !worldType;
+          tft.fillScreen(ST77XX_BLACK);
+          tft.setCursor(0,counter*16);
+          tft.print(">");
+          tft.setCursor(16,0);
+          tft.print("Start");
+          tft.setCursor(16,16);
+          tft.print("Generate type:");
+          if (worldType) {
+            tft.print("flat");
+          }else{
+            tft.print("usual");
+          }
+        }
+      }
+    }
+  }
+}
+
+
+
 
 const uint16_t sprites[numOfSprites][64] PROGMEM = {
   {
@@ -156,7 +239,18 @@ const uint16_t sprites[numOfSprites][64] PROGMEM = {
   0xc618, 0x6b4d, 0x6b4d, 0x6b4d, 0x6b4d, 0x6b4d, 0x6b4d, 0xc618
   },
   {
-    //игрок 11
+    //Песок 11
+	0xdeb5, 0xce13, 0xcdf2, 0xd674, 0xd654, 0xd674, 0xd695, 0xdeb5,
+  0xd695, 0xc590, 0xcdd1, 0xce13, 0xce13, 0xcdf2, 0xcdd1, 0xce12,
+  0xcdd1, 0xde96, 0xce33, 0xd654, 0xd654, 0xd654, 0xce12, 0xd694, 
+	0xcdf2, 0xce12, 0xcdf2, 0xcdf2, 0xcdd1, 0xcdf2, 0xd633, 0xcdd1,
+  0xd653, 0xce12, 0xce33, 0xc590, 0xce12, 0xcdf2, 0xce12, 0xcdf2,
+  0xcd90, 0xce12, 0xd674, 0xcdf2, 0xd694, 0xd653, 0xcdf2, 0xce12, 
+	0xd654, 0xd654, 0xd633, 0xd653, 0xd654, 0xd654, 0xce13, 0xce13,
+  0xd674, 0xd674, 0xd674, 0xd633, 0xd653, 0xce12, 0xce13, 0xce12
+  },
+  {
+    //игрок 12
   0xd69a, 0xc618, 0xc618, 0xc618, 0xc618, 0xc618, 0xc618, 0xd69a,
   0xdedb, 0x8c71, 0x8410, 0x8410, 0x8410, 0x8410, 0x8c71, 0xce79,
   0xc618, 0x8410, 0xdedb, 0xdefb, 0xdefb, 0xffff, 0x8410, 0xc618, 
@@ -304,6 +398,9 @@ void generateWorld() {
         
     }
   }
+  for (int i = 0; i < WorldW; i++) {
+    world[i][WorldH-1] = {2, 0b00001100};      //камень снизу мира
+  }
   return;
 }
 
@@ -355,6 +452,9 @@ void render(int scale) {
       }else{
         blockType = world[i][n].type;
       }
+      if (n < 0) {
+        blockType = 8;
+      }
       drawBitmp(blockX*(8*scale)+16, blockY*(8*scale), blockType, scale);
       blockY++;
     }
@@ -376,19 +476,153 @@ void render(int scale) {
   return;
 }
 
-void gravity() {
-  while (((world[playerX][playerY+1].flags & (1<<0)) || (world[playerX][playerY+1].flags & (1<<4))) && (world[playerX][playerY+1].type != 10)) {
-    playerY++;
-    render(2);
-    delay(25);
+
+
+bool canFall(uint8_t x, uint8_t y) {
+  if (y < WorldH-1) {
+    if (y+1 == playerY) return 0;
+    if (world[x][y+1].flags & NO_COLLISION || world[x][y+1].flags & BROKEN) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+bool canFall(uint8_t x, uint8_t y, bool diagonal) {
+  if (y < WorldH-1) {
+    if (x > 0 && x < WorldW-1) {
+      if (diagonal) {
+        if (y+1 == playerY && x+1 == playerX) return 0;
+        if (world[x+1][y+1].flags & NO_COLLISION || world[x+1][y+1].flags & BROKEN) return 1;
+      }else {
+        if (y+1 == playerY && x-1 == playerX) return 0;
+        if (world[x-1][y+1].flags & NO_COLLISION || world[x-1][y+1].flags & BROKEN) return 1;
+      }
+    }else{
+      if (x == 0) {
+        if (diagonal) {
+          if (y+1 == playerY && x+1 == playerX) return 0;
+          if (world[x+1][y+1].flags & NO_COLLISION || world[x+1][y+1].flags & BROKEN) return 1;
+        }else{
+          if (y+1 == playerY && playerX == WorldW-1) return 0;
+          if (world[WorldW-1][y+1].flags & NO_COLLISION || world[WorldW-1][y+1].flags & BROKEN) return 1;
+        }
+      }else if (x == WorldW-1) {
+        if (diagonal) {
+          if (y+1 == playerY && playerX == 0) return 0;
+          if (world[0][y+1].flags & NO_COLLISION || world[0][y+1].flags & BROKEN) return 1;
+        }else{
+          if (y+1 == playerY && playerX == x-1) return 0;
+          if (world[x-1][y+1].flags & NO_COLLISION || world[x-1][y+1].flags & BROKEN) return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+void addToBuffer(uint8_t x, uint8_t y) {
+  if (activeCount == liquidBufferSize) return;
+  liquidBuffer[activeCount][0] = x;
+  liquidBuffer[activeCount][1] = y;
+  world[x][y].flags |= ADD_BUFFER;
+  activeCount++;
+  return;
+}
+
+void deleteFromBuffer(uint8_t id) {
+  if (activeCount == 0) return;
+  world[liquidBuffer[id][0]][liquidBuffer[id][1]].flags &= ~ADD_BUFFER;
+  if (id != activeCount-1) {
+    liquidBuffer[id][0] = liquidBuffer[activeCount-1][0];
+    liquidBuffer[id][1] = liquidBuffer[activeCount-1][1];
+    activeCount--;
+  }else{
+    activeCount--;
   }
   return;
 }
+
+void checkLiquidBlocks(uint8_t x, uint8_t y) {        //указываем блок от которого идет проверка
+  if (y > 0) {
+    if (x > 0 && x < WorldW-1) {
+      if (world[x-1][y-1].flags & MOVABLE && !(world[x-1][y-1].flags & ADD_BUFFER)) addToBuffer(x-1, y-1);
+      if (world[x][y-1].flags & MOVABLE && !(world[x][y-1].flags & ADD_BUFFER)) addToBuffer(x, y-1);
+      if (world[x+1][y-1].flags & MOVABLE && !(world[x+1][y-1].flags & ADD_BUFFER)) addToBuffer(x+1, y-1);
+    }else if (x == 0) {
+      if (world[WorldW-1][y-1].flags & MOVABLE && !(world[WorldW-1][y-1].flags & ADD_BUFFER)) addToBuffer(WorldW-1, y-1);
+      if (world[x][y-1].flags & MOVABLE && !(world[x][y-1].flags & ADD_BUFFER)) addToBuffer(x, y-1);
+      if (world[x+1][y-1].flags & MOVABLE && !(world[x+1][y-1].flags & ADD_BUFFER)) addToBuffer(x+1, y-1);
+    }else if (x == WorldW-1) {
+      if (world[x-1][y-1].flags & MOVABLE && !(world[x-1][y-1].flags & ADD_BUFFER)) addToBuffer(x-1, y-1);
+      if (world[x][y-1].flags & MOVABLE && !(world[x][y-1].flags & ADD_BUFFER)) addToBuffer(x, y-1);
+      if (world[0][y-1].flags & MOVABLE && !(world[0][y-1].flags & ADD_BUFFER)) addToBuffer(0, y-1);
+    }
+  }
+  return;
+}
+
+
+
+void liquidTick() {
+  if (activeCount == 0) return;            //все координаты в массиве будут обязательно в начале, если он пуст значит и буффер пуст
+  for (int i = activeCount-1; i >= 0; i--) {
+    uint8_t x = liquidBuffer[i][0];
+    uint8_t y = liquidBuffer[i][1];
+    if (x >= playerX-4 && x <= playerX+4 && y >= playerY-4 && y <= playerY+3) needRender = 1;
+    if (canFall(x, y)) {
+      world[x][liquidBuffer[i][1]+1].type = world[x][liquidBuffer[i][1]].type;
+      world[x][liquidBuffer[i][1]+1].flags = world[x][liquidBuffer[i][1]].flags;
+      world[x][y].type = (y < Surface) ? 8 : 9;
+      world[x][y].flags = 0;
+      world[x][y].flags |= NO_COLLISION;
+      checkLiquidBlocks(x, y);
+      liquidBuffer[i][1] += 1;
+    }else {
+      bool side = random(0, 2); // 0 - влево, 1 - вправо
+      if (canFall(x, y, side)) {
+        // Вычисляем целевой X с учетом заворота мира
+        uint8_t tx = (side) ? ((x + 1) % WorldW) : (x > 0 ? x - 1 : WorldW - 1);
+        
+        world[tx][y+1].type = world[x][y].type;
+        world[tx][y+1].flags = world[x][y].flags;
+        
+        world[x][y].type = (y < Surface) ? 8 : 9;
+        world[x][y].flags = 0;
+        world[x][y].flags = NO_COLLISION;
+
+        checkLiquidBlocks(x, y);
+        liquidBuffer[i][0] = tx;   // Обновляем X в буфере
+        liquidBuffer[i][1] = y + 1; // Обновляем Y в буфере
+      } 
+      else if (canFall(x, y, !side)) { // Проверяем другую сторону
+        uint8_t tx = (!side) ? ((x + 1) % WorldW) : (x > 0 ? x - 1 : WorldW - 1);
+        
+        world[tx][y+1].type = world[x][y].type;
+        world[tx][y+1].flags = world[x][y].flags;
+        
+        world[x][y].type = (y < Surface) ? 8 : 9;
+        world[x][y].flags = 0;
+        world[x][y].flags = NO_COLLISION;
+
+        checkLiquidBlocks(x, y);
+        liquidBuffer[i][0] = tx;
+        liquidBuffer[i][1] = y + 1;
+      } 
+      else {
+        deleteFromBuffer(i);
+      }
+    }
+  }
+}
+
+
 
 void setup() {
   Serial.begin(115200);
   Serial.print("Testing random... ");
   Serial.print(Random(32, 64));
+  
   playerX = Random(0, WorldW-1);
   tft.initR(INITR_BLACKTAB);      // Init ST7735S chip, black tab
   tft.setSPISpeed(70000000);
@@ -397,109 +631,141 @@ void setup() {
   pinMode(but1, INPUT);
   pinMode(but2, INPUT);
   pinMode(but3, INPUT);
-  //drawBar(100);
-  /*
-  drawBitmp(32, 32, 0, 1);
-  drawBitmp(40, 32, 0, 2);
-  drawBitmp(56, 32, 0, 3);
-  */
   tft.setTextSize(1);   
   tft.setTextColor(ST7735_WHITE);
-  tft.setCursor(32,0); 
+  tft.setCursor(32,0);
+  //mainMenu();
   generateWorld();
-  render(2);
   world[60][Surface-1] = {2, 0b00001100};
   world[59][Surface-1] = {3, 0b00001100};
   world[58][Surface-1] = {4, 0b00001100};
   world[57][Surface-1] = {5, 0b00001100};
   world[56][Surface-1] = {6, 0b00001100};
   world[55][Surface-1] = {7, 0b00001100};
-  
+  world[playerX][29] = {11, MOVABLE};
+  render(2);
 }
 
 void loop() {
+  if (millis()-renderTmr >= 30) {
+    renderTmr = millis();
+    if (needRender) render(2);
+    needRender = 0;
+  }
+  if (millis()-liquidTmr >= liquidUpdate) {
+    liquidTmr = millis();
+    liquidTick();
+  }
+  if (millis()-gravityTmr >= 25) {
+    gravityTmr = millis();
+    if (((world[playerX][playerY+1].flags & (1<<0)) || (world[playerX][playerY+1].flags & (1<<4))) && (world[playerX][playerY+1].type != 10)) {
+      checkLiquidBlocks(playerX, playerY);
+      playerY++;
+      checkLiquidBlocks(playerX, playerY);
+      needRender = 1;
+    }
+  }
   if (millis()-tmr >= 300) {
     tmr = millis();
     if (analogRead(joyx) >= 2500) {
       if (playerX == 0) {
         if (world[WorldW-1][playerY].flags & (1<<0) || world[WorldW-1][playerY].flags & (1<<4)) {
-        playerX = WorldW-1;
-        render(2);
-        gravity();
+          checkLiquidBlocks(playerX, playerY);
+          playerX = WorldW-1;
+          checkLiquidBlocks(playerX, playerY);
+          needRender = 1;
       }else if ((world[WorldW-1][playerY].flags & (1<<3)) == 0) {
         world[WorldW-1][playerY].flags |= (1<<0);
         world[WorldW-1][playerY].type = 9;
+        checkLiquidBlocks(playerX, playerY);
         playerX = WorldW-1;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }
       }else if (world[playerX-1][playerY].flags & (1<<0) || world[playerX-1][playerY].flags & (1<<4)) {
+        checkLiquidBlocks(playerX, playerY);
         playerX--;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }else if ((world[playerX-1][playerY].flags & (1<<3)) == 0) {
         world[playerX-1][playerY].flags |= (1<<0);
         world[playerX-1][playerY].type = 9;
+        checkLiquidBlocks(playerX, playerY);
         playerX--;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }
     }else if (analogRead(joyx) <= 800) {
       if (playerX == 127) {
         if (world[0][playerY].flags & (1<<0) || world[0][playerY].flags & (1<<4)) {
+          checkLiquidBlocks(0, playerY);
           playerX = 0;
-          render(2);
-          gravity();
+          needRender = 1;
         }else if ((world[0][playerY].flags & (1<<3)) == 0) {
           world[0][playerY].flags |= (1<<0);
           world[0][playerY].type = 9;
+          checkLiquidBlocks(playerX, playerY);
           playerX = 0;
-          render(2);
-          gravity();
+          checkLiquidBlocks(playerX, playerY);
+          needRender = 1;
         }
       }else if (world[playerX+1][playerY].flags & (1<<0) || world[playerX+1][playerY].flags & (1<<4)) {
+        checkLiquidBlocks(playerX, playerY);
         playerX++;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }else if ((world[playerX+1][playerY].flags & (1<<3)) == 0) {
         world[playerX+1][playerY].flags |= (1<<0);
         world[playerX+1][playerY].type = 9;
+        checkLiquidBlocks(playerX, playerY);
         playerX++;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }
     }
     if (analogRead(joyy) >= 2500) {
-      if ((world[playerX][playerY-1].flags & (1<<0)) || (world[playerX][playerY-1].flags & (1<<4))) {
-        world[playerX][playerY].flags = 0b00111;
-        world[playerX][playerY].type = 10;
-        playerY--;
-        render(2);
-        gravity();
-      }else if ((world[playerX][playerY-1].flags & (1<<3)) == 0) {
-        world[playerX][playerY].flags = 0b00111;
-        world[playerX][playerY].type = 10;
-        world[playerX][playerY-1].flags |= (1<<0);
-        world[playerX][playerY-1].type = 9;
-        playerY--;
-        render(2);
-        gravity();
-      }else if (world[playerX][playerY-1].type == 10) {
-        playerY--;
-        render(2);
-        gravity();
+      if (playerY > 0) {
+        if ((world[playerX][playerY-1].flags & (1<<0)) || (world[playerX][playerY-1].flags & (1<<4))) {
+          world[playerX][playerY].flags = 0b00101;
+          world[playerX][playerY].type = 10;
+          checkLiquidBlocks(playerX, playerY);
+          playerY--;
+          checkLiquidBlocks(playerX, playerY);
+          needRender = 1;
+        }else if ((world[playerX][playerY-1].flags & (1<<3)) == 0) {
+          world[playerX][playerY].flags = 0b00101;
+          world[playerX][playerY].type = 10;
+          world[playerX][playerY-1].flags |= (1<<0);
+          world[playerX][playerY-1].type = 9;
+          checkLiquidBlocks(playerX, playerY);
+          playerY--;
+          checkLiquidBlocks(playerX, playerY);
+          needRender = 1;
+        }else if (world[playerX][playerY-1].type == 10) {
+          checkLiquidBlocks(playerX, playerY);
+          playerY--;
+          checkLiquidBlocks(playerX, playerY);
+          needRender = 1;
+        }
+      }else{
+        tft.setTextSize(1);
+        tft.setCursor(64,16);
+        tft.setTextColor(ST7735_BLACK);
+        tft.print("too far");
       }
     }else if (analogRead(joyy) <= 800) {
       if (world[playerX][playerY+1].flags & (1<<0) || world[playerX][playerY+1].flags & (1<<4)) {
+        checkLiquidBlocks(playerX, playerY);
         playerY++;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }else if ((world[playerX][playerY+1].flags & (1<<3)) == 0) {
         world[playerX][playerY+1].flags |= (1<<0);
         world[playerX][playerY+1].type = 9;
+        checkLiquidBlocks(playerX, playerY);
         playerY++;
-        render(2);
-        gravity();
+        checkLiquidBlocks(playerX, playerY);
+        needRender = 1;
       }
     }
   }
